@@ -1,0 +1,8 @@
+packages:
+- .
+extra-deps:
+- hspec-2.9.3
+- emojis-0.1.4.1
+- discord-haskell-1.16.0
+- unliftio-0.2.25.0
+resolver: lts-20.26
