@@ -2,16 +2,10 @@
 
 module Game (GameId, UserGame(..), StoredMessage(..), Player(..), Game(..), createGame, processPlayerAction, getPlayerById, getCurrentTurnMsg) where
 
---import Data.Text (Text)
---import qualified Data.Text.IO as TIO
---import Control.Monad (forM_, void)
---import Data.List (find)
+import Data.List (findIndex)
+import Data.Text (Text)
 
---import Discord
 import Discord.Types
-import Data.List (elemIndex)
---import Discord.Interactions
---import qualified Discord.Requests as R
 
 newtype GameId = GameId Int
     deriving Eq
@@ -25,6 +19,7 @@ data StoredMessage = StoredMessage
 
 data Player = Player
     { playerUserId :: UserId
+    , playerHiddenWord :: Text
     }
     deriving Eq
 
@@ -40,20 +35,18 @@ data Game = Game
 
 newtype Winner = Winner UserId
 
-createGame :: GuildId -> ChannelId -> UserId -> UserId -> [StoredMessage] -> Game
-createGame gid cid uid1 uid2 initialMsgs = Game
+createGame :: GuildId -> ChannelId -> Player -> Player -> [StoredMessage] -> Game
+createGame gid cid player1 player2 initialMsgs = Game
     { Game.gameId = GameId 0
     , Game.gameGuessChannelId = cid
     , Game.guildId = gid
-    , players = [newPlayer uid1]--, newPlayer uid2]
+    , players = [player1]--, newPlayer uid2]
     , currentPlayer = 0
     , currentTurn = 0
     , guesses = initialMsgs }
-    where
-        newPlayer uid = Player { Game.playerUserId = uid }
 
-processPlayerAction :: Game -> Player -> Game
-processPlayerAction g p = do
+processPlayerAction :: Game -> UserId -> Game
+processPlayerAction g uid = do
     case activePlayerIndex of
         Just i  -> if i == currentPlayer
                        then Game
@@ -75,7 +68,7 @@ processPlayerAction g p = do
             , currentPlayer = currentPlayer
             , currentTurn = currentTurn
             , guesses = guesses } = g
-        activePlayerIndex = elemIndex p ps
+        activePlayerIndex = findIndex (\p -> uid == playerUserId p) ps
 
 --getPlayerByIndex :: Game -> Int -> Maybe Player
 --getPlayerByIndex  Game { players } playerIndex = getFromList players playerIndex 0

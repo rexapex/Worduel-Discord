@@ -5,6 +5,8 @@ module Worduel (worduel) where
 import Helpers
 import Game
 
+import System.Random (randomRIO)
+
 import qualified Data.Text
 import Data.Text (Text)
 import qualified Data.Text.IO as TIO
@@ -19,6 +21,7 @@ import Discord.Interactions
 import qualified Discord.Requests as R
 import Data.Maybe (catMaybes)
 import Discord.Requests (MessageDetailedOpts(MessageDetailedOpts))
+import WordList (targetWords, dictionary)
 
 data GlobalState = GlobalState  [Game] [UserGame]
 
@@ -92,8 +95,18 @@ challenge = SlashCommand
                                         -- Create the 6 rows required by the Worduel game, these will be edited as the rounds progress
                                         msgs <- catMaybes <$> replicateM 6 (sendInitialRowMsg cid)
 
+                                        -- Generate the hidden words and send them to the players
+                                        wordIndex1 <- randomRIO (0, length targetWords - 1)
+                                        wordIndex2 <- randomRIO (0, length targetWords - 1)
+                                        let word1 = targetWords !! wordIndex1
+                                        let word2 = targetWords !! wordIndex2
+                                        sendDM sid word1
+                                        sendDM sid word2
+
                                         -- TODO - Currently using requester ID for both players
-                                        let newGame = createGame gid threadId sid sid msgs
+                                        let player1 = Player { playerUserId = sid, playerHiddenWord = word1 }
+                                        let player2 = Player { playerUserId = sid, playerHiddenWord = word2 }
+                                        let newGame = createGame gid threadId player1 player2 msgs
                                         let newUserGame = UserGame sid (gameId newGame)
 
                                         liftIO $ writeIORef globalState (GlobalState (newGame : games) (newUserGame : userGames))
@@ -157,6 +170,18 @@ editMsg msg txt = do
         Left err -> echo $ "Failed to edit message " <> showT msg <> ", " <> showT err
     return msg
 
+sendDM :: UserId -> Text -> DiscordHandler ()
+sendDM uid txt = do
+    dmResult <- restCall $ R.CreateDM uid
+    case dmResult of
+        Right channel -> do
+            void . restCall $ R.CreateMessage (channelId channel) txt
+        Left err      -> echo $ "Failed to create DM to send msg " <> showT txt <> ", " <> showT err
+
+sendReaction :: ChannelId -> MessageId -> Text -> DiscordHandler ()
+sendReaction cid mid txt = do
+    void . restCall $ R.CreateReaction (cid, mid) txt
+
 getGameOfUser :: UserId -> IORef GlobalState -> DiscordHandler (Maybe Game)
 getGameOfUser uid globalState = do 
     GlobalState games userGames <- liftIO $ readIORef globalState
@@ -215,27 +240,25 @@ onMessageCreate :: Message -> IORef GlobalState -> DiscordHandler ()
 onMessageCreate msg globalState = do
     GlobalState games userGames <- liftIO $ readIORef globalState
     let txt = messageContent msg
-    --echo $ "onMessageCreate " <> txt <> " " <> showT (Data.Text.length txt)
-    if Data.Text.length txt == 5 then do
-        --echo "Message is 5 characters long"
-        let uid = userId $ messageAuthor msg
-        maybeGame <- getGameOfUser uid globalState
-        case maybeGame of
-            Just game -> do
-                --echo "Found game"
-                if gameGuessChannelId game == messageChannelId msg then do
+    let uid = userId $ messageAuthor msg
+    maybeGame <- getGameOfUser uid globalState
+    case maybeGame of
+        Just game -> do
+            if gameGuessChannelId game == messageChannelId msg then do
+                if Data.Text.length txt == 5 && elem txt dictionary then do
                     let maybeStoredMsg = getCurrentTurnMsg game
                     echo $ "Current Turn: " <> showT (currentTurn game)
-                    let updatedGame = processPlayerAction game (Player uid)
+                    let updatedGame = processPlayerAction game uid
                     echo $ "Current Turn after Update: " <> showT (currentTurn updatedGame)
                     case maybeStoredMsg  of
                         Just storedMsg -> do
                             updateRowWithGuess storedMsg txt
                             let newGames = updatedGame : deleteBy (\x y -> gameId x == gameId y) game games
                             liftIO $ writeIORef globalState (GlobalState newGames userGames)
+                            sendReaction (messageChannelId msg) (messageId msg) ":white_check_mark:"
                             echo "Found message in thread"
                         Nothing -> echo ""
                     echo ""
-                else return ()
-            Nothing -> return ()
-    else return ()
+                else sendReaction (messageChannelId msg) (messageId msg) ":x:"
+            else return ()
+        Nothing -> return ()

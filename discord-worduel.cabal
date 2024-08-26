@@ -25,9 +25,10 @@ source-repository head
 
 library
   exposed-modules:
-      Helpers
-      Worduel
       Game
+      Helpers
+      WordList
+      Worduel
   other-modules:
       Paths_discord_worduel
   hs-source-dirs:
@@ -38,6 +39,7 @@ library
     , discord-haskell
     , text
     , unliftio
+    , random
   default-language: Haskell2010
 
 executable discord-worduel-exe
@@ -53,6 +55,7 @@ executable discord-worduel-exe
     , discord-worduel
     , text
     , unliftio
+    , random
   default-language: Haskell2010
 
 test-suite discord-worduel-test
@@ -69,4 +72,5 @@ test-suite discord-worduel-test
     , discord-worduel
     , text
     , unliftio
+    , random
   default-language: Haskell2010

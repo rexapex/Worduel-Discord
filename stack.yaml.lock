@@ -32,6 +32,13 @@ packages:
       sha256: 08c62f256e740e1a78b175907c26cb06439a1b486ceb8021c5a2e4425ebb6c5b
   original:
     hackage: unliftio-0.2.25.0
+- completed:
+    hackage: random-1.2.1.1@sha256:e7c1f881159d5cc788619c9ee8b8f340ba2ff0db571cdf3d1a1968ebc5108789,6777
+    pantry-tree:
+      size: 1528
+      sha256: adc460de1e12074b8fb5634330089e11aeeac02b02716ba15b9f4de6fa1de425
+  original:
+    hackage: random-1.2.1.1
 snapshots:
 - completed:
     size: 650475
