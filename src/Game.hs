@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Game (GameId, UserGame(..), StoredMessage(..), Player(..), Game(..), createGame, processPlayerAction, getPlayerById, getCurrentTurnMsg, genColourHints) where
+module Game (GameId, UserGame(..), StoredMessage(..), Player(..), Game(..), createGame, processPlayerAction, getOpponent, getPlayerById, getCurrentTurnMsg, genColourHints) where
 
 import Data.List (findIndex, delete)
 import Data.Text (Text, unpack)
@@ -32,8 +32,6 @@ data Game = Game
     , currentTurn :: Int
     , guesses :: [StoredMessage]
     }
-
-newtype Winner = Winner UserId
 
 createGame :: GuildId -> ChannelId -> Player -> Player -> [StoredMessage] -> Game
 createGame gid cid player1 player2 initialMsgs = Game
@@ -70,13 +68,16 @@ processPlayerAction g uid = do
             , guesses = guesses } = g
         activePlayerIndex = findIndex (\p -> uid == playerUserId p) ps
 
---getPlayerByIndex :: Game -> Int -> Maybe Player
---getPlayerByIndex  Game { players } playerIndex = getFromList players playerIndex 0
---    where
---        getFromList [] _ _ = Nothing
---        getFromList (p : ps) c i
---            | i == c    = Just p
---            | otherwise = getFromList ps c (i + 1)
+getOpponent :: Game -> Maybe Player
+getOpponent g = getPlayerByIndex g (getNextPlayerIndex g)
+
+getPlayerByIndex :: Game -> Int -> Maybe Player
+getPlayerByIndex Game { players = players } playerIndex = getFromList players playerIndex 0
+    where
+        getFromList [] _ _ = Nothing
+        getFromList (p : ps) c i
+            | i == c    = Just p
+            | otherwise = getFromList ps c (i + 1)
 
 getPlayerById :: Game -> UserId -> Maybe Player
 getPlayerById Game { players = players } = getFromList players

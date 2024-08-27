@@ -10,10 +10,11 @@ import System.Random (randomRIO)
 import qualified Data.Text
 import Data.Text (Text)
 import qualified Data.Text.IO as TIO
-import Control.Monad (forM_, void, replicateM)
+import Control.Monad (forM_, void, replicateM, when)
 import Control.Monad.IO.Class
 import Data.List (find, deleteBy)
 import Data.IORef
+import Data.Foldable (for_)
 
 import Discord
 import Discord.Types
@@ -75,7 +76,13 @@ challenge = SlashCommand
             Just sid -> do
                 let userGame = find (\(UserGame uid _) -> uid == sid) userGames
                 case userGame of
-                    Just (UserGame _ _) -> echo "Failed to create game, user is already in a game!"
+                    Just (UserGame _ _) -> do
+                        void . restCall $
+                            R.CreateInteractionResponse
+                                (interactionId intr)
+                                (interactionToken intr)
+                                (interactionResponseBasic "You're already in a game!")
+                        echo "Failed to create game, user is already in a game!"
                     Nothing             -> do
                         -- Create a game, create a player, link the player to the game
                         case guildId of
@@ -115,8 +122,20 @@ challenge = SlashCommand
 
                                 echo "Created new game"
 
-                            Nothing -> echo "Failed to create a new game, no guild ID provided"
-            Nothing -> echo "Couldn't get ID of user"
+                            Nothing -> do
+                                void . restCall $
+                                    R.CreateInteractionResponse
+                                        (interactionId intr)
+                                        (interactionToken intr)
+                                        (interactionResponseBasic "Failed to create a new game, only available in a server")
+                                echo "Failed to create a new game, no guild ID provided"
+            Nothing -> do
+                void . restCall $
+                    R.CreateInteractionResponse
+                        (interactionId intr)
+                        (interactionToken intr)
+                        (interactionResponseBasic "Failed to create a new game, couldn't get ID of user")
+                echo "Failed to create a new game, couldn't get ID of user"
     }
 
 createGuessThread :: ChannelId -> DiscordHandler ChannelId
@@ -241,23 +260,52 @@ onMessageCreate msg globalState = do
     let txt = messageContent msg
     let uid = userId $ messageAuthor msg
     maybeGame <- getGameOfUser uid globalState
-    case maybeGame of
-        Just game -> do
-            if gameGuessChannelId game == messageChannelId msg then do
-                if Data.Text.length txt == 5 && elem txt dictionary then do
-                    let maybeStoredMsg = getCurrentTurnMsg game
-                    echo $ "Current Turn: " <> showT (currentTurn game)
-                    let updatedGame = processPlayerAction game uid
-                    echo $ "Current Turn after Update: " <> showT (currentTurn updatedGame)
-                    case maybeStoredMsg  of
-                        Just storedMsg -> do
-                            updateRowWithGuess game storedMsg txt
-                            let newGames = updatedGame : deleteBy (\x y -> gameId x == gameId y) game games
-                            liftIO $ writeIORef globalState (GlobalState newGames userGames)
-                            sendReaction (messageChannelId msg) (messageId msg) ":white_check_mark:"
-                            echo "Found message in thread"
-                        Nothing -> echo ""
-                    echo ""
-                else sendReaction (messageChannelId msg) (messageId msg) ":x:"
-            else return ()
-        Nothing -> return ()
+    for_ maybeGame $ \game -> do
+        when (gameGuessChannelId game == messageChannelId msg) $ do
+            if Data.Text.length txt == 5 && elem txt dictionary then do
+                let maybeStoredMsg = getCurrentTurnMsg game
+                echo $ "Current Turn: " <> showT (currentTurn game)
+                let updatedGame = processPlayerAction game uid
+                echo $ "Current Turn after Update: " <> showT (currentTurn updatedGame)
+                for_ maybeStoredMsg $ \storedMsg -> do
+                    updateRowWithGuess game storedMsg txt
+                    -- First, check if the guess matches the opponent's hidden word
+                    if Just txt == (playerHiddenWord <$> getOpponent game) then do
+                        let (updatedGames, updatedUserGames) = deleteGame game games userGames
+                        liftIO $ writeIORef globalState (GlobalState updatedGames updatedUserGames)
+                        sendReaction (messageChannelId msg) (messageId msg) ":partying_face:"
+                        sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " has won the duel!"
+                        echo "Guesser Wins!"
+                    -- Second, check if the guess matches the current player's hidden word
+                    else if Just txt == (playerHiddenWord <$> getPlayerById game uid) then do
+                        let (updatedGames, updatedUserGames) = deleteGame game games userGames
+                        liftIO $ writeIORef globalState (GlobalState updatedGames updatedUserGames)
+                        sendReaction (messageChannelId msg) (messageId msg) ":sob:"
+                        sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " guessed their own word!"
+                        echo "Opponent Wins!"
+                    -- Third, check if this was the final turn
+                    else if currentTurn game == 5 then do
+                        let (updatedGames, updatedUserGames) = deleteGame game games userGames
+                        liftIO $ writeIORef globalState (GlobalState updatedGames updatedUserGames)
+                        sendReaction (messageChannelId msg) (messageId msg) ":thumbsdown:"
+                        sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " failed to guess correctly, game ends in a draw!"
+                        echo "Draw!"
+                    -- Else, no player has won so update the game
+                    else do
+                        let updatedGames = updatedGame : deleteBy (\x y -> gameId x == gameId y) game games
+                        liftIO $ writeIORef globalState (GlobalState updatedGames userGames)
+                        sendReaction (messageChannelId msg) (messageId msg) ":white_check_mark:"
+                        echo "No Winner Yet!"
+            else sendReaction (messageChannelId msg) (messageId msg) ":x:"
+
+    where
+        sendWinnerMsg :: ChannelId -> User -> Text -> DiscordHandler ()
+        sendWinnerMsg cid winner txt = void . restCall $ R.CreateMessage cid (userName winner <> txt)
+
+deleteGame :: Game -> [Game] -> [UserGame] -> ([Game], [UserGame])
+deleteGame game games userGames = do
+    let updatedUserGames = concatMap (\p -> deleteBy userGameMatches (UserGame (playerUserId p) (gameId game)) userGames) (players game)
+    let updatedGames = deleteBy (\x y -> gameId x == gameId y) game games
+    (updatedGames, updatedUserGames)
+    where
+        userGameMatches (UserGame uid1 _) (UserGame uid2 _) = uid1 == uid2
