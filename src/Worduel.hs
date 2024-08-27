@@ -146,11 +146,10 @@ sendInitialRowMsg cid = do
             echo $ "Failed to send message to channel " <> showT cid <> ", " <> showT err
             return Nothing
 
-updateRowWithGuess :: StoredMessage -> Text -> DiscordHandler ()
-updateRowWithGuess msg txt = do
-    let txt2 = Data.Text.concatMap (\c -> ":regional_indicator_" <> Data.Text.singleton c <> ": ") txt
-    let txt3 = txt2 <> "         :black_large_square: :black_large_square: :black_large_square: :black_large_square: :black_large_square:          :black_large_square: :black_large_square: :black_large_square: :black_large_square: :black_large_square:"
-    updatedMsg <- editMsg msg txt3
+updateRowWithGuess :: Game -> StoredMessage -> Text -> DiscordHandler ()
+updateRowWithGuess game msg txt = do
+    let txt2 = Data.Text.concatMap (\c -> ":regional_indicator_" <> Data.Text.singleton c <> ": ") txt <> "         " <> genColourHints game txt
+    _ <- editMsg msg txt2
     echo ""
 
 editMsg :: StoredMessage -> Text -> DiscordHandler StoredMessage
@@ -252,7 +251,7 @@ onMessageCreate msg globalState = do
                     echo $ "Current Turn after Update: " <> showT (currentTurn updatedGame)
                     case maybeStoredMsg  of
                         Just storedMsg -> do
-                            updateRowWithGuess storedMsg txt
+                            updateRowWithGuess game storedMsg txt
                             let newGames = updatedGame : deleteBy (\x y -> gameId x == gameId y) game games
                             liftIO $ writeIORef globalState (GlobalState newGames userGames)
                             sendReaction (messageChannelId msg) (messageId msg) ":white_check_mark:"
