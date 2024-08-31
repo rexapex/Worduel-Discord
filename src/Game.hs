@@ -1,14 +1,19 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module Game (GameId, UserGame(..), StoredMessage(..), Player(..), Game(..), createGame, processPlayerAction, getOpponent, getPlayerById, getCurrentTurnMsg, genColourHints) where
+module Game (GameId, UserGame(..), StoredMessage(..), Player(..), Game(..), createGame, processPlayerAction, getOpponent, getPlayerByIndex, getPlayerById, getCurrentTurnMsg, genColourHints) where
 
 import Data.List (findIndex, delete)
+import qualified Data.Text
 import Data.Text (Text, unpack)
+import Data.Foldable (for_)
+import Control.Monad (when)
 
 import Discord.Types
 
-newtype GameId = GameId Int
-    deriving Eq
+import WordList (dictionary)
+
+newtype GameId = GameId UserId
+    deriving (Eq, Show)
 
 data UserGame = UserGame UserId GameId
 
@@ -20,52 +25,61 @@ data StoredMessage = StoredMessage
 data Player = Player
     { playerUserId :: UserId
     , playerHiddenWord :: Text
-    }
-    deriving Eq
+    } deriving (Eq, Show)
 
 data Game = Game
     { gameId :: GameId
-    , gameGuessChannelId :: ChannelId
-    , guildId :: GuildId
+    , gameGuessChannelId :: Maybe ChannelId
+    , gameChallengerId :: UserId
+    , gameChallengeMsg :: StoredMessage
     , players :: [Player]
     , currentPlayer :: Int
     , currentTurn :: Int
     , guesses :: [StoredMessage]
-    }
+    } deriving Show
 
-createGame :: GuildId -> ChannelId -> Player -> Player -> [StoredMessage] -> Game
-createGame gid cid player1 player2 initialMsgs = Game
-    { Game.gameId = GameId 0
-    , Game.gameGuessChannelId = cid
-    , Game.guildId = gid
-    , players = [player1]--, newPlayer uid2]
+createGame :: Player -> Player -> StoredMessage -> Game
+createGame player1 player2 challengeMsg = Game
+    { Game.gameId = GameId $ playerUserId player1 -- TODO - Change this if players can participate in > 1 game at once
+    , Game.gameGuessChannelId = Nothing
+    , gameChallengerId = playerUserId player1
+    , gameChallengeMsg = challengeMsg
+    , players = [player1, player2]
     , currentPlayer = 0
-    , currentTurn = 0
-    , guesses = initialMsgs }
+    , currentTurn = -1
+    , guesses = [] }
 
-processPlayerAction :: Game -> UserId -> Game
-processPlayerAction g uid = do
+processPlayerAction :: Game -> ChannelId -> UserId -> Text -> Maybe Game
+processPlayerAction game cid uid guess = do
     case activePlayerIndex of
-        Just i  -> if i == currentPlayer
-                       then Game
-                           { gameId = gameId
-                           , Game.guildId = gid
-                           , gameGuessChannelId = gameGuessChannelId
-                           , players = ps
-                           , currentPlayer = getNextPlayerIndex g
-                           , currentTurn = currentTurn + 1
-                           , guesses = guesses }
-                       else g
-        Nothing -> g
+        Just i ->
+            if i == currentPlayer then
+                case gameGuessChannelId of
+                    Just guessChannelId ->
+                        if guessChannelId == cid && Data.Text.length guess == 5 && elem guess dictionary then
+                            Just Game
+                               { gameId = gameId
+                               , gameGuessChannelId = gameGuessChannelId
+                               , gameChallengerId = gameChallengerId
+                               , gameChallengeMsg = gameChallengeMsg
+                               , players = ps
+                               , currentPlayer = getNextPlayerIndex game
+                               , currentTurn = currentTurn + 1
+                               , guesses = guesses }
+                        else Nothing
+                    Nothing -> Nothing
+            else Nothing
+        Nothing -> Nothing
     where
         Game
             { gameId = gameId
-            , Game.guildId = gid
             , gameGuessChannelId = gameGuessChannelId
+            , gameChallengerId = gameChallengerId
+            , gameChallengeMsg = gameChallengeMsg
             , players = ps
             , currentPlayer = currentPlayer
             , currentTurn = currentTurn
-            , guesses = guesses } = g
+            , guesses = guesses } = game
         activePlayerIndex = findIndex (\p -> uid == playerUserId p) ps
 
 getOpponent :: Game -> Maybe Player

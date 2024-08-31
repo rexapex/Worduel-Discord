@@ -12,7 +12,7 @@ import Data.Text (Text)
 import qualified Data.Text.IO as TIO
 import Control.Monad (forM_, void, replicateM, when)
 import Control.Monad.IO.Class
-import Data.List (find, deleteBy)
+import Data.List (find, deleteBy, delete)
 import Data.IORef
 import Data.Foldable (for_)
 
@@ -23,8 +23,10 @@ import qualified Discord.Requests as R
 import Data.Maybe (catMaybes)
 import Discord.Requests (MessageDetailedOpts(MessageDetailedOpts))
 import WordList (targetWords, dictionary)
+import qualified Discord.Interactions as R
+import Discord.Internal.Rest (ReactionInfo(ReactionInfo))
 
-data GlobalState = GlobalState  [Game] [UserGame]
+data GlobalState = GlobalState  [Game]
 
 worduel :: IO ()
 worduel = do
@@ -33,7 +35,7 @@ worduel = do
     tok <- getToken
     guildId <- getGuildId
 
-    globalState <- newIORef $ GlobalState [] []
+    globalState <- newIORef $ GlobalState []
 
     -- Open ghci and run  [[ :info RunDiscordOpts ]] to see available fields
     err <- runDiscord $ def { discordToken = tok
@@ -56,16 +58,31 @@ ping :: SlashCommand
 ping = SlashCommand
     { name = "ping"
     , registration = createChatInput "ping" "responds pong"
-    , handler = \intr globalState _options ->
+    , handler = \intr _globalState _options ->
         void . restCall $
             R.CreateInteractionResponse (interactionId intr) (interactionToken intr) (interactionResponseBasic "pong") }
 
 challenge :: SlashCommand
 challenge = SlashCommand
     { name = "challenge"
-    , registration =  createChatInput "challenge" "challenge player to a game of worduel"
-    , handler = \intr globalState _options -> do
-        GlobalState games userGames <- liftIO $ readIORef globalState
+    , registration = Just R.CreateApplicationCommandChatInput
+        { createName = "challenge"
+        , createLocalizedName = Nothing
+        , createDescription = "Challenge player to a game of Worduel"
+        , createLocalizedDescription = Nothing
+        , createOptions = Just $ R.OptionsValues
+            [ R.OptionValueUser
+                { optionValueName = "player"
+                , optionValueLocalizedName = Nothing
+                , optionValueDescription = "Player to challenge"
+                , optionValueLocalizedDescription = Nothing
+                , optionValueRequired = True } 
+            ]
+        , createDefaultMemberPermissions = Nothing
+        , createDMPermission = Nothing
+        }
+    , handler = \intr globalState maybeOptions -> do
+        GlobalState games <- liftIO $ readIORef globalState
         let MemberOrUser memberOrUser = interactionUser intr
         let senderId = case memberOrUser  of
                            Left m  -> userId <$> memberUser m
@@ -74,9 +91,10 @@ challenge = SlashCommand
 
         case senderId of
             Just sid -> do
-                let userGame = find (\(UserGame uid _) -> uid == sid) userGames
-                case userGame of
-                    Just (UserGame _ _) -> do
+                -- TODO - This should also fail if the opponent is in a game
+                let maybeGame = getGameOfUser sid games
+                case maybeGame of
+                    Just _ -> do
                         void . restCall $
                             R.CreateInteractionResponse
                                 (interactionId intr)
@@ -86,41 +104,8 @@ challenge = SlashCommand
                     Nothing             -> do
                         -- Create a game, create a player, link the player to the game
                         case guildId of
-                            Just gid -> do
-                                void . restCall $
-                                    R.CreateInteractionResponse
-                                        (interactionId intr)
-                                        (interactionToken intr)
-                                        (interactionResponseBasic "Starting game of Worduel!")
-
-                                let channelId = interactionChannelId intr
-                                case channelId of
-                                    Just cid -> do
-                                        -- Create the thread where players will send guesses
-                                        threadId <- createGuessThread cid
-
-                                        -- Create the 6 rows required by the Worduel game, these will be edited as the rounds progress
-                                        msgs <- catMaybes <$> replicateM 6 (sendInitialRowMsg cid)
-
-                                        -- Generate the hidden words and send them to the players
-                                        wordIndex1 <- randomRIO (0, length targetWords - 1)
-                                        wordIndex2 <- randomRIO (0, length targetWords - 1)
-                                        let word1 = targetWords !! wordIndex1
-                                        let word2 = targetWords !! wordIndex2
-                                        sendDM sid word1
-                                        sendDM sid word2
-
-                                        -- TODO - Currently using requester ID for both players
-                                        let player1 = Player { playerUserId = sid, playerHiddenWord = word1 }
-                                        let player2 = Player { playerUserId = sid, playerHiddenWord = word2 }
-                                        let newGame = createGame gid threadId player1 player2 msgs
-                                        let newUserGame = UserGame sid (gameId newGame)
-
-                                        liftIO $ writeIORef globalState (GlobalState (newGame : games) (newUserGame : userGames))
-
-                                    Nothing -> echo "Failed to get channel ID of /challenge command, may have been sent in DM"
-
-                                echo "Created new game"
+                            Just _ -> do
+                                createChallengeMsg intr sid maybeOptions globalState
 
                             Nothing -> do
                                 void . restCall $
@@ -137,6 +122,52 @@ challenge = SlashCommand
                         (interactionResponseBasic "Failed to create a new game, couldn't get ID of user")
                 echo "Failed to create a new game, couldn't get ID of user"
     }
+
+createChallengeMsg :: Interaction -> UserId -> Maybe OptionsData -> IORef GlobalState -> DiscordHandler ()
+createChallengeMsg intr senderId maybeOptions globalState = do
+    case maybeOptions of
+        Just (OptionsDataValues values) -> do
+            let maybePlayerOption = find (\opt -> case opt of
+                                                OptionDataValueUser { optionDataValueName = name } -> name == "player"
+                                                _                                                  -> False) values
+
+            for_ maybePlayerOption $ \playerOption -> do
+                let opponentId = optionDataValueUser playerOption
+                maybeBot <- restCall R.GetCurrentUser
+                for_ maybeBot $ \bot -> do
+                    if senderId /= opponentId && opponentId /= userId bot then do
+                        result <- restCall $ R.CreateInteractionResponse
+                                (interactionId intr)
+                                (interactionToken intr)
+                                (interactionResponseBasic $ "<@" <> showT opponentId <> ">, <@" <> showT senderId <> "> challenged you to a game of Worduel");
+                        case result of
+                            Right _ -> do
+                                -- Fetch the original interaction response message
+                                msgResult <- restCall $ R.GetOriginalInteractionResponse (interactionApplicationId intr) (interactionToken intr)
+                                case msgResult of
+                                    Right msg -> do
+                                        -- Send a reaction to the message
+                                        let msgId = messageId msg
+                                        let channelId = messageChannelId msg
+                                        sendReaction channelId msgId ":white_check_mark:"
+                                        sendReaction channelId msgId ":x:"
+
+                                        let player1 = Player { playerUserId = senderId, playerHiddenWord = "" }
+                                        let player2 = Player { playerUserId = opponentId, playerHiddenWord = "" }
+                                        let newGame = createGame player1 player2 (StoredMessage channelId msgId)
+
+                                        GlobalState games <- liftIO $ readIORef globalState
+                                        liftIO $ writeIORef globalState (GlobalState (newGame : games))
+
+                                    Left err -> echo $ "Failed to fetch original message: " <> showT err
+                            Left err -> echo $ "Failed to send challenge msg response: " <> showT err
+                    else void . restCall $ R.CreateInteractionResponse
+                            (interactionId intr)
+                            (interactionToken intr)
+                            (interactionResponseBasic "Invalid opponent");
+
+                    
+        _ -> echo ""
 
 createGuessThread :: ChannelId -> DiscordHandler ChannelId
 createGuessThread cid = do
@@ -200,19 +231,21 @@ sendReaction :: ChannelId -> MessageId -> Text -> DiscordHandler ()
 sendReaction cid mid txt = do
     void . restCall $ R.CreateReaction (cid, mid) txt
 
-getGameOfUser :: UserId -> IORef GlobalState -> DiscordHandler (Maybe Game)
-getGameOfUser uid globalState = do 
-    GlobalState games userGames <- liftIO $ readIORef globalState
-    let userGame = find (\(UserGame uid2 _) -> uid == uid2) userGames
-    return $ case userGame of
-        Just (UserGame _ gid) -> find (\Game { gameId = gameId } -> gameId == gid) games
-        Nothing               -> Nothing
+getGameOfUser :: UserId -> [Game] -> (Maybe Game)
+getGameOfUser uid games = do 
+    let x :: Game -> Bool
+        x = (\g -> elem uid [ playerUserId p | p <- players g ])
+    let y :: Maybe Game
+        y = find x games
+    y
+    --return find (\g -> elem uid [ playerUserId p | p <- players g ]) games
 
 onDiscordEvent :: IORef GlobalState -> GuildId -> Event -> DiscordHandler ()
 onDiscordEvent globalState guildId event = case event of
     Ready _ _ _ _ _ _ (PartialApplication appId _) -> onReady appId guildId
     InteractionCreate intr                         -> onInteractionCreate intr globalState
     MessageCreate msg                              -> onMessageCreate msg globalState
+    MessageReactionAdd reaction                    -> onMessageReactionAdd reaction globalState
     _                                              -> return ()
 
 onReady :: ApplicationId -> GuildId -> DiscordHandler ()
@@ -256,56 +289,106 @@ onInteractionCreate intr globalState = case intr of
 
 onMessageCreate :: Message -> IORef GlobalState -> DiscordHandler ()
 onMessageCreate msg globalState = do
-    GlobalState games userGames <- liftIO $ readIORef globalState
+    GlobalState games <- liftIO $ readIORef globalState
     let txt = messageContent msg
     let uid = userId $ messageAuthor msg
-    maybeGame <- getGameOfUser uid globalState
+    let maybeGame = getGameOfUser uid games
     for_ maybeGame $ \game -> do
-        when (gameGuessChannelId game == messageChannelId msg) $ do
-            if Data.Text.length txt == 5 && elem txt dictionary then do
-                let maybeStoredMsg = getCurrentTurnMsg game
-                echo $ "Current Turn: " <> showT (currentTurn game)
-                let updatedGame = processPlayerAction game uid
-                echo $ "Current Turn after Update: " <> showT (currentTurn updatedGame)
-                for_ maybeStoredMsg $ \storedMsg -> do
+        echo $ "Current Turn: " <> showT game
+        let maybeUpdatedGame = processPlayerAction game (messageChannelId msg) uid txt
+        case maybeUpdatedGame of
+            Just updatedGame -> do
+                echo $ "Current Turn after Update: " <> showT updatedGame
+                for_ (getCurrentTurnMsg game) $ \storedMsg -> do
                     updateRowWithGuess game storedMsg txt
                     -- First, check if the guess matches the opponent's hidden word
                     if Just txt == (playerHiddenWord <$> getOpponent game) then do
-                        let (updatedGames, updatedUserGames) = deleteGame game games userGames
-                        liftIO $ writeIORef globalState (GlobalState updatedGames updatedUserGames)
+                        let updatedGames = deleteGame game games
+                        liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":partying_face:"
                         sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " has won the duel!"
                         echo "Guesser Wins!"
                     -- Second, check if the guess matches the current player's hidden word
                     else if Just txt == (playerHiddenWord <$> getPlayerById game uid) then do
-                        let (updatedGames, updatedUserGames) = deleteGame game games userGames
-                        liftIO $ writeIORef globalState (GlobalState updatedGames updatedUserGames)
+                        let updatedGames = deleteGame game games
+                        liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":sob:"
                         sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " guessed their own word!"
                         echo "Opponent Wins!"
                     -- Third, check if this was the final turn
                     else if currentTurn game == 5 then do
-                        let (updatedGames, updatedUserGames) = deleteGame game games userGames
-                        liftIO $ writeIORef globalState (GlobalState updatedGames updatedUserGames)
+                        let updatedGames = deleteGame game games
+                        liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":thumbsdown:"
                         sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " failed to guess correctly, game ends in a draw!"
                         echo "Draw!"
                     -- Else, no player has won so update the game
                     else do
-                        let updatedGames = updatedGame : deleteBy (\x y -> gameId x == gameId y) game games
-                        liftIO $ writeIORef globalState (GlobalState updatedGames userGames)
+                        let updatedGames = updatedGame : deleteGame game games
+                        liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":white_check_mark:"
                         echo "No Winner Yet!"
-            else sendReaction (messageChannelId msg) (messageId msg) ":x:"
+            Nothing -> sendReaction (messageChannelId msg) (messageId msg) ":x:"
 
     where
         sendWinnerMsg :: ChannelId -> User -> Text -> DiscordHandler ()
         sendWinnerMsg cid winner txt = void . restCall $ R.CreateMessage cid (userName winner <> txt)
 
-deleteGame :: Game -> [Game] -> [UserGame] -> ([Game], [UserGame])
-deleteGame game games userGames = do
-    let updatedUserGames = concatMap (\p -> deleteBy userGameMatches (UserGame (playerUserId p) (gameId game)) userGames) (players game)
-    let updatedGames = deleteBy (\x y -> gameId x == gameId y) game games
-    (updatedGames, updatedUserGames)
-    where
-        userGameMatches (UserGame uid1 _) (UserGame uid2 _) = uid1 == uid2
+onMessageReactionAdd :: ReactionInfo -> IORef GlobalState -> DiscordHandler ()
+onMessageReactionAdd reaction globalState = do
+    let msgId = reactionMessageId reaction
+    let channelId = reactionChannelId reaction
+    let userId = reactionUserId reaction
+    let emoji = reactionEmoji reaction
+
+    echo $ emojiName emoji
+    if emojiName emoji == "✅" then do
+        -- Get the game, get the stored msg, get the channel id
+        GlobalState games <- liftIO $ readIORef globalState
+        let maybeGame = getGameOfUser userId games
+        for_ maybeGame $ \game -> do
+            let maybePlayer2 = getPlayerByIndex game 1
+            for_ maybePlayer2 $ \player2 -> do
+                when (msgId == storedMessageId (gameChallengeMsg game) && (currentTurn game == -1) && (playerUserId player2 == userId)) $ do
+                    let challengerId = gameChallengerId game
+
+                    -- Create the thread where players will send guesses
+                    threadId <- createGuessThread channelId
+
+                    -- Create the 6 rows required by the Worduel game, these will be edited as the rounds progress
+                    msgs <- catMaybes <$> replicateM 6 (sendInitialRowMsg channelId)
+
+                    -- Generate the hidden words and send them to the players
+                    wordIndex1 <- randomRIO (0, length targetWords - 1)
+                    wordIndex2 <- randomRIO (0, length targetWords - 1)
+                    let word1 = targetWords !! wordIndex1
+                    let word2 = targetWords !! wordIndex2
+                    sendDM challengerId word1
+                    sendDM userId word2
+
+                    let updatedPlayer1 = Player { playerUserId = challengerId, playerHiddenWord = word1 }
+                    let updatedPlayer2 = Player { playerUserId = userId, playerHiddenWord = word2 }
+                    let updatedGame = Game
+                            { gameId = gameId game
+                            , gameGuessChannelId = Just threadId
+                            , gameChallengerId = challengerId
+                            , gameChallengeMsg = gameChallengeMsg game
+                            , players = [updatedPlayer1, updatedPlayer2]
+                            , currentPlayer = 0
+                            , currentTurn = 0
+                            , guesses = msgs }
+
+                    let updatedGames = updatedGame : (deleteGame game games)
+                    liftIO $ writeIORef globalState (GlobalState updatedGames)
+    else if emojiName emoji == "❌" then do
+        GlobalState games <- liftIO $ readIORef globalState
+        let maybeGame = getGameOfUser userId games
+        for_ maybeGame $ \game -> do
+            when (elem userId ([playerUserId p | p <- players game])) $ do
+                restCall $ R.DeleteMessage (channelId, storedMessageId $ gameChallengeMsg game)
+                let updatedGames = deleteGame game games
+                liftIO $ writeIORef globalState (GlobalState updatedGames)
+    else return ()
+
+deleteGame :: Game -> [Game] -> [Game]
+deleteGame game games = deleteBy (\x y -> gameId x == gameId y) game games
