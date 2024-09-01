@@ -5,8 +5,6 @@ module Game (GameId, UserGame(..), StoredMessage(..), Player(..), Game(..), crea
 import Data.List (findIndex, delete)
 import qualified Data.Text
 import Data.Text (Text, unpack)
-import Data.Foldable (for_)
-import Control.Monad (when)
 
 import Discord.Types
 
@@ -32,61 +30,57 @@ data Game = Game
     , gameGuessChannelId :: Maybe ChannelId
     , gameChallengerId :: UserId
     , gameChallengeMsg :: StoredMessage
-    , players :: [Player]
-    , currentPlayer :: Int
-    , currentTurn :: Int
-    , guesses :: [StoredMessage]
+    , gamePlayers :: [Player]
+    , gameCurrentPlayer :: Int
+    , gameCurrentTurn :: Int
+    , gameGuesses :: [StoredMessage]
     } deriving Show
 
 createGame :: Player -> Player -> StoredMessage -> Game
 createGame player1 player2 challengeMsg = Game
-    { Game.gameId = GameId $ playerUserId player1 -- TODO - Change this if players can participate in > 1 game at once
-    , Game.gameGuessChannelId = Nothing
+    { gameId = GameId $ playerUserId player1 -- TODO - Change this if players can participate in > 1 game at once
+    , gameGuessChannelId = Nothing
     , gameChallengerId = playerUserId player1
     , gameChallengeMsg = challengeMsg
-    , players = [player1, player2]
-    , currentPlayer = 0
-    , currentTurn = -1
-    , guesses = [] }
+    , gamePlayers = [player1, player2]
+    , gameCurrentPlayer = 0
+    , gameCurrentTurn = -1
+    , gameGuesses = [] }
 
 processPlayerAction :: Game -> ChannelId -> UserId -> Text -> Maybe Game
 processPlayerAction game cid uid guess = do
-    case activePlayerIndex of
-        Just i ->
-            if i == currentPlayer then
-                case gameGuessChannelId of
-                    Just guessChannelId ->
-                        if guessChannelId == cid && Data.Text.length guess == 5 && elem guess dictionary then
-                            Just Game
-                               { gameId = gameId
-                               , gameGuessChannelId = gameGuessChannelId
-                               , gameChallengerId = gameChallengerId
-                               , gameChallengeMsg = gameChallengeMsg
-                               , players = ps
-                               , currentPlayer = getNextPlayerIndex game
-                               , currentTurn = currentTurn + 1
-                               , guesses = guesses }
-                        else Nothing
-                    Nothing -> Nothing
-            else Nothing
-        Nothing -> Nothing
+    i <- activePlayerIndex
+    if i == currentPlayer then do
+        guessChannelId <- gameGuessChannelId
+        if guessChannelId == cid && Data.Text.length guess == 5 && elem guess dictionary then
+            Just Game
+               { gameId = gameId
+               , gameGuessChannelId = gameGuessChannelId
+               , gameChallengerId = gameChallengerId
+               , gameChallengeMsg = gameChallengeMsg
+               , gamePlayers = ps
+               , gameCurrentPlayer = getNextPlayerIndex game
+               , gameCurrentTurn = currentTurn + 1
+               , gameGuesses = guesses }
+        else Nothing
+    else Nothing
     where
         Game
             { gameId = gameId
             , gameGuessChannelId = gameGuessChannelId
             , gameChallengerId = gameChallengerId
             , gameChallengeMsg = gameChallengeMsg
-            , players = ps
-            , currentPlayer = currentPlayer
-            , currentTurn = currentTurn
-            , guesses = guesses } = game
+            , gamePlayers = ps
+            , gameCurrentPlayer = currentPlayer
+            , gameCurrentTurn = currentTurn
+            , gameGuesses = guesses } = game
         activePlayerIndex = findIndex (\p -> uid == playerUserId p) ps
 
 getOpponent :: Game -> Maybe Player
 getOpponent g = getPlayerByIndex g (getNextPlayerIndex g)
 
 getPlayerByIndex :: Game -> Int -> Maybe Player
-getPlayerByIndex Game { players = players } playerIndex = getFromList players playerIndex 0
+getPlayerByIndex Game { gamePlayers = players } playerIndex = getFromList players playerIndex 0
     where
         getFromList [] _ _ = Nothing
         getFromList (p : ps) c i
@@ -94,7 +88,7 @@ getPlayerByIndex Game { players = players } playerIndex = getFromList players pl
             | otherwise = getFromList ps c (i + 1)
 
 getPlayerById :: Game -> UserId -> Maybe Player
-getPlayerById Game { players = players } = getFromList players
+getPlayerById Game { gamePlayers = players } = getFromList players
     where
         getFromList [] _ = Nothing
         getFromList (p : ps) pid
@@ -104,10 +98,10 @@ getPlayerById Game { players = players } = getFromList players
                 Player { Game.playerUserId = uid } = p
 
 getNextPlayerIndex :: Game -> Int
-getNextPlayerIndex Game { players = players, currentPlayer = currentPlayer } = (currentPlayer + 1) `mod` length players
+getNextPlayerIndex Game { gamePlayers = players, gameCurrentPlayer = currentPlayer } = (currentPlayer + 1) `mod` length players
 
 getCurrentTurnMsg :: Game -> Maybe StoredMessage
-getCurrentTurnMsg Game { currentTurn = currentTurn, guesses = guesses } = getFromList guesses 0
+getCurrentTurnMsg Game { gameCurrentTurn = currentTurn, gameGuesses = guesses } = getFromList guesses 0
     where
         getFromList [] _          = Nothing
         getFromList (m : ms) turn
@@ -115,7 +109,7 @@ getCurrentTurnMsg Game { currentTurn = currentTurn, guesses = guesses } = getFro
             | otherwise           = getFromList ms (turn + 1)
 
 genColourHints :: Game -> Text -> Text
-genColourHints Game { players = players } txt = genHintsForPlayers players
+genColourHints Game { gamePlayers = players } txt = genHintsForPlayers players
     where
         genHintsForPlayers :: [Player] ->  Text
         genHintsForPlayers []     = ""

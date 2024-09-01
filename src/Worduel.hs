@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE LambdaCase #-}
 
 module Worduel (worduel) where
 
@@ -12,7 +13,7 @@ import Data.Text (Text)
 import qualified Data.Text.IO as TIO
 import Control.Monad (forM_, void, replicateM, when)
 import Control.Monad.IO.Class
-import Data.List (find, deleteBy, delete)
+import Data.List (find, deleteBy)
 import Data.IORef
 import Data.Foldable (for_)
 
@@ -22,11 +23,10 @@ import Discord.Interactions
 import qualified Discord.Requests as R
 import Data.Maybe (catMaybes)
 import Discord.Requests (MessageDetailedOpts(MessageDetailedOpts))
-import WordList (targetWords, dictionary)
+import WordList (targetWords)
 import qualified Discord.Interactions as R
-import Discord.Internal.Rest (ReactionInfo(ReactionInfo))
 
-data GlobalState = GlobalState  [Game]
+newtype GlobalState = GlobalState  [Game]
 
 worduel :: IO ()
 worduel = do
@@ -52,15 +52,7 @@ data SlashCommand = SlashCommand
     }
 
 mySlashCommands :: [SlashCommand]
-mySlashCommands = [ping, challenge]
-
-ping :: SlashCommand
-ping = SlashCommand
-    { name = "ping"
-    , registration = createChatInput "ping" "responds pong"
-    , handler = \intr _globalState _options ->
-        void . restCall $
-            R.CreateInteractionResponse (interactionId intr) (interactionToken intr) (interactionResponseBasic "pong") }
+mySlashCommands = [challenge]
 
 challenge :: SlashCommand
 challenge = SlashCommand
@@ -127,10 +119,8 @@ createChallengeMsg :: Interaction -> UserId -> Maybe OptionsData -> IORef Global
 createChallengeMsg intr senderId maybeOptions globalState = do
     case maybeOptions of
         Just (OptionsDataValues values) -> do
-            let maybePlayerOption = find (\opt -> case opt of
-                                                OptionDataValueUser { optionDataValueName = name } -> name == "player"
-                                                _                                                  -> False) values
-
+            let maybePlayerOption = find(\case OptionDataValueUser { optionDataValueName = name } -> name == "player"
+                                               _                                                  -> False) values
             for_ maybePlayerOption $ \playerOption -> do
                 let opponentId = optionDataValueUser playerOption
                 maybeBot <- restCall R.GetCurrentUser
@@ -214,8 +204,7 @@ editMsg msg txt = do
         , R.messageDetailedComponents = Nothing
         , R.messageDetailedStickerIds = Nothing })
     case msgResult of
-        -- TODO - Verify messageId stays the same
-        Right _ -> echo $ "Successfully edited message" <> showT msg--StoredMessage { storedChannelId = (storedChannelId)storedMessageId updatedMsg
+        Right _ -> echo $ "Successfully edited message" <> showT msg
         Left err -> echo $ "Failed to edit message " <> showT msg <> ", " <> showT err
     return msg
 
@@ -231,14 +220,13 @@ sendReaction :: ChannelId -> MessageId -> Text -> DiscordHandler ()
 sendReaction cid mid txt = do
     void . restCall $ R.CreateReaction (cid, mid) txt
 
-getGameOfUser :: UserId -> [Game] -> (Maybe Game)
+getGameOfUser :: UserId -> [Game] -> Maybe Game
 getGameOfUser uid games = do 
     let x :: Game -> Bool
-        x = (\g -> elem uid [ playerUserId p | p <- players g ])
+        x g = uid `elem` [ playerUserId p | p <- gamePlayers g ]
     let y :: Maybe Game
         y = find x games
     y
-    --return find (\g -> elem uid [ playerUserId p | p <- players g ]) games
 
 onDiscordEvent :: IORef GlobalState -> GuildId -> Event -> DiscordHandler ()
 onDiscordEvent globalState guildId event = case event of
@@ -281,7 +269,7 @@ onReady appId guildId = do
 
 onInteractionCreate :: Interaction -> IORef GlobalState -> DiscordHandler ()
 onInteractionCreate intr globalState = case intr of
-    cmd@InteractionApplicationCommand { applicationCommandData = input } -> -- @ApplicationCommandDataChatInput {} } ->
+    cmd@InteractionApplicationCommand { applicationCommandData = input } ->
         case find (\c -> applicationCommandDataName input == name c) mySlashCommands of
             Just found -> handler found cmd globalState (optionsData input)
             Nothing    -> echo "Unknown slash command (registrations out of date?)"
@@ -316,7 +304,7 @@ onMessageCreate msg globalState = do
                         sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " guessed their own word!"
                         echo "Opponent Wins!"
                     -- Third, check if this was the final turn
-                    else if currentTurn game == 5 then do
+                    else if gameCurrentTurn game == 5 then do
                         let updatedGames = deleteGame game games
                         liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":thumbsdown:"
@@ -327,12 +315,14 @@ onMessageCreate msg globalState = do
                         let updatedGames = updatedGame : deleteGame game games
                         liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":white_check_mark:"
+                        case getPlayerByIndex updatedGame (gameCurrentPlayer updatedGame) of
+                            Just p -> void . restCall $ R.CreateMessage (messageChannelId msg) ("<@" <> showT (playerUserId p) <> ">'s turn")
+                            Nothing -> echo ""
                         echo "No Winner Yet!"
             Nothing -> sendReaction (messageChannelId msg) (messageId msg) ":x:"
-
     where
         sendWinnerMsg :: ChannelId -> User -> Text -> DiscordHandler ()
-        sendWinnerMsg cid winner txt = void . restCall $ R.CreateMessage cid (userName winner <> txt)
+        sendWinnerMsg cid winner txt = void . restCall $ R.CreateMessage cid ("<@" <> showT (userId winner) <> ">" <> txt)
 
 onMessageReactionAdd :: ReactionInfo -> IORef GlobalState -> DiscordHandler ()
 onMessageReactionAdd reaction globalState = do
@@ -349,7 +339,7 @@ onMessageReactionAdd reaction globalState = do
         for_ maybeGame $ \game -> do
             let maybePlayer2 = getPlayerByIndex game 1
             for_ maybePlayer2 $ \player2 -> do
-                when (msgId == storedMessageId (gameChallengeMsg game) && (currentTurn game == -1) && (playerUserId player2 == userId)) $ do
+                when (msgId == storedMessageId (gameChallengeMsg game) && (gameCurrentTurn game == -1) && (playerUserId player2 == userId)) $ do
                     let challengerId = gameChallengerId game
 
                     -- Create the thread where players will send guesses
@@ -373,22 +363,22 @@ onMessageReactionAdd reaction globalState = do
                             , gameGuessChannelId = Just threadId
                             , gameChallengerId = challengerId
                             , gameChallengeMsg = gameChallengeMsg game
-                            , players = [updatedPlayer1, updatedPlayer2]
-                            , currentPlayer = 0
-                            , currentTurn = 0
-                            , guesses = msgs }
+                            , gamePlayers = [updatedPlayer1, updatedPlayer2]
+                            , gameCurrentPlayer = 0
+                            , gameCurrentTurn = 0
+                            , gameGuesses = msgs }
+                    void . restCall $ R.CreateMessage threadId ("<@" <> showT challengerId <> ">'s turn")
 
-                    let updatedGames = updatedGame : (deleteGame game games)
+                    let updatedGames = updatedGame : deleteGame game games
                     liftIO $ writeIORef globalState (GlobalState updatedGames)
-    else if emojiName emoji == "❌" then do
+    else when (emojiName emoji == "❌") $ do
         GlobalState games <- liftIO $ readIORef globalState
         let maybeGame = getGameOfUser userId games
         for_ maybeGame $ \game -> do
-            when (elem userId ([playerUserId p | p <- players game])) $ do
-                restCall $ R.DeleteMessage (channelId, storedMessageId $ gameChallengeMsg game)
+            when (userId `elem` ([playerUserId p | p <- gamePlayers game])) $ do
+                void . restCall $ R.DeleteMessage (channelId, storedMessageId $ gameChallengeMsg game)
                 let updatedGames = deleteGame game games
                 liftIO $ writeIORef globalState (GlobalState updatedGames)
-    else return ()
 
 deleteGame :: Game -> [Game] -> [Game]
-deleteGame game games = deleteBy (\x y -> gameId x == gameId y) game games
+deleteGame = deleteBy (\x y -> gameId x == gameId y)
