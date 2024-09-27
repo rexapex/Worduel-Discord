@@ -159,8 +159,8 @@ createChallengeMsg intr senderId maybeOptions globalState = do
                     
         _ -> echo ""
 
-createGuessThread :: ChannelId -> DiscordHandler ChannelId
-createGuessThread cid = do
+createGuessThread :: ChannelId -> UserId -> UserId -> DiscordHandler ChannelId
+createGuessThread cid playerId1 playerId2 = do
     startThreadResult <- restCall $
         R.StartThreadNoMessage cid R.StartThreadNoMessageOpts
         { R.startThreadNoMessageBaseOpts = R.StartThreadOpts
@@ -171,7 +171,7 @@ createGuessThread cid = do
         , R.startThreadNoMessageInvitable = Just False }
     case startThreadResult of
         Right thread -> do
-            msgResult <- restCall $ R.CreateMessage (channelId thread) "Check DMs for your hidden word & enter guesses in the thread"
+            msgResult <- restCall $ R.CreateMessage (channelId thread) ("<@" <> showT playerId1 <> "> (**left**) vs <@" <> showT playerId2 <> "> (**right**)\nCheck DMs for your hidden word, guess your opponent's to win!")
             case msgResult of
                 Right _  -> return $ channelId thread
                 Left err -> echo ("Failed to start thread in channel " <> showT cid <> ", " <> showT err) >> return cid
@@ -179,7 +179,7 @@ createGuessThread cid = do
 
 sendInitialRowMsg :: ChannelId -> DiscordHandler (Maybe StoredMessage)
 sendInitialRowMsg cid = do
-    msgResult <- restCall $ R.CreateMessage cid ":blue_square: :blue_square: :blue_square: :blue_square: :blue_square:          :black_large_square: :black_large_square: :black_large_square: :black_large_square: :black_large_square:          :black_large_square: :black_large_square: :black_large_square: :black_large_square: :black_large_square:"
+    msgResult <- restCall $ R.CreateMessage cid ":black_large_square: :black_large_square: :black_large_square: :black_large_square: :black_large_square:          :black_large_square: :black_large_square: :black_large_square: :black_large_square: :black_large_square:"
     case msgResult of
         Right msg -> return $ Just (StoredMessage cid (messageId msg))
         Left err  -> do
@@ -188,8 +188,7 @@ sendInitialRowMsg cid = do
 
 updateRowWithGuess :: Game -> StoredMessage -> Text -> DiscordHandler ()
 updateRowWithGuess game msg txt = do
-    let txt2 = Data.Text.concatMap (\c -> ":regional_indicator_" <> Data.Text.singleton c <> ": ") txt <> "         " <> genColourHints game txt
-    _ <- editMsg msg txt2
+    _ <- editMsg msg $ genColourHints game txt
     echo ""
 
 editMsg :: StoredMessage -> Text -> DiscordHandler StoredMessage
@@ -295,6 +294,7 @@ onMessageCreate msg globalState = do
                         liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":partying_face:"
                         sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " has won the duel!"
+                        mapM_ (\p -> sendWordRevealMsg (messageChannelId msg) p) (gamePlayers game)
                         echo "Guesser Wins!"
                     -- Second, check if the guess matches the current player's hidden word
                     else if Just txt == (playerHiddenWord <$> getPlayerById game uid) then do
@@ -302,6 +302,7 @@ onMessageCreate msg globalState = do
                         liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":sob:"
                         sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " guessed their own word!"
+                        mapM_ (\p -> sendWordRevealMsg (messageChannelId msg) p) (gamePlayers game)
                         echo "Opponent Wins!"
                     -- Third, check if this was the final turn
                     else if gameCurrentTurn game == 5 then do
@@ -309,6 +310,7 @@ onMessageCreate msg globalState = do
                         liftIO $ writeIORef globalState (GlobalState updatedGames)
                         sendReaction (messageChannelId msg) (messageId msg) ":thumbsdown:"
                         sendWinnerMsg (messageChannelId msg) (messageAuthor msg) " failed to guess correctly, game ends in a draw!"
+                        mapM_ (\p -> sendWordRevealMsg (messageChannelId msg) p) (gamePlayers game)
                         echo "Draw!"
                     -- Else, no player has won so update the game
                     else do
@@ -323,6 +325,9 @@ onMessageCreate msg globalState = do
     where
         sendWinnerMsg :: ChannelId -> User -> Text -> DiscordHandler ()
         sendWinnerMsg cid winner txt = void . restCall $ R.CreateMessage cid ("<@" <> showT (userId winner) <> ">" <> txt)
+
+        sendWordRevealMsg :: ChannelId -> Player -> DiscordHandler ()
+        sendWordRevealMsg cid p = void . restCall $ R.CreateMessage cid ("<@" <> showT (playerUserId p) <> ">'s word was **" <> (playerHiddenWord p) <> "**")
 
 onMessageReactionAdd :: ReactionInfo -> IORef GlobalState -> DiscordHandler ()
 onMessageReactionAdd reaction globalState = do
@@ -343,7 +348,7 @@ onMessageReactionAdd reaction globalState = do
                     let challengerId = gameChallengerId game
 
                     -- Create the thread where players will send guesses
-                    threadId <- createGuessThread channelId
+                    threadId <- createGuessThread channelId challengerId userId
 
                     -- Create the 6 rows required by the Worduel game, these will be edited as the rounds progress
                     msgs <- catMaybes <$> replicateM 6 (sendInitialRowMsg channelId)
